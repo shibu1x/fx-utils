@@ -5,9 +5,9 @@ dotenv: [".env"]
 tasks:
   build:
     cmds:
-      - task: arm
-      - docker buildx imagetools create -t ${REGISTRY}/${APP_NAME}:latest ${REGISTRY}/${APP_NAME}:arm
-      - docker pull ${REGISTRY}/${APP_NAME}:latest
+      - task: amd
+      - docker buildx imagetools create -t ${REGISTRY}/${APP_NAME}:latest ${REGISTRY}/${APP_NAME}:amd
+      - ssh ${DEPLOY_HOST} "docker pull ${REGISTRY}/${APP_NAME}:latest"
       - say -v Samantha "The Docker build is complete."
 
   amd:

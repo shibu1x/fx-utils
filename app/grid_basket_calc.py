@@ -20,17 +20,17 @@ CONTRACT_SIZE = 100_000  # 1 lot = 100,000 USD
 LOT_STEP = 0.01
 
 
-def round_lot(lot):
+def round_lot(lot: float) -> float:
     return round(round(lot / LOT_STEP) * LOT_STEP, 2)
 
 
-def calc_step_price(step_price_base, step_multiplier, level):
+def calc_step_price(step_price_base: float, step_multiplier: float, level: int) -> float:
     """Grid step distance required to open `level` (0-indexed; level 1 = first add)."""
     return step_price_base * (step_multiplier ** max(level - 1, 0))
 
 
-def build_positions(entry, extreme, direction, lot, lot_multiplier,
-                     step_pips, step_multiplier, max_levels):
+def build_positions(entry: float, extreme: float, direction: str, lot: float, lot_multiplier: float,
+                     step_pips: float, step_multiplier: float, max_levels: int) -> list[dict[str, float]]:
     is_buy = direction == "buy"
     step_price_base = step_pips * PIP
     positions = [{"level": 0, "lot": round_lot(lot), "price": entry}]
@@ -49,16 +49,17 @@ def build_positions(entry, extreme, direction, lot, lot_multiplier,
     return positions
 
 
-def calc_margin(lot, leverage):
+def calc_margin(lot: float, leverage: int) -> float:
     return lot * CONTRACT_SIZE / leverage
 
 
-def calc_pnl(entry, price, lot, direction):
+def calc_pnl(entry: float, price: float, lot: float, direction: str) -> float:
     diff = (price - entry) if direction == "buy" else (entry - price)
     return diff * lot * CONTRACT_SIZE / price
 
 
-def print_report(direction, entry, extreme, price, positions, leverage):
+def print_report(direction: str, entry: float, extreme: float, price: float,
+                  positions: list[dict[str, float]], leverage: int) -> float:
     total_lot = sum(p["lot"] for p in positions)
     total_margin = sum(calc_margin(p["lot"], leverage) for p in positions)
     total_pnl_extreme = sum(calc_pnl(p["price"], extreme, p["lot"], direction) for p in positions)
@@ -89,7 +90,7 @@ def print_report(direction, entry, extreme, price, positions, leverage):
     return total_pnl
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         description="Calculate grid basket (Martingale) margin and unrealized P&L for USD/JPY, "
                      "given a level-0 entry price, the furthest (extreme) price reached, and the current price"

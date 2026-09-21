@@ -1,22 +1,29 @@
 #!/usr/bin/env python3
 """
-Fetch daily close price for multiple FX pairs (USD/JPY, AUD/USD, NZD/USD, GBP/USD) using yfinance.
+Fetch hourly FX price data (USD/JPY, EUR/USD, GBP/USD) from Dukascopy
+and resample it into daily OHLC bars using a New York 17:00 session boundary.
 """
 
 import argparse
+import logging
 import math
 import os
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
-import yfinance as yf
+import dukascopy_python
+import pandas as pd
 
-PAIRS = {
-    "USDJPY": "JPY=X",
-}
+logging.disable(logging.INFO)
+
+DEFAULT_PAIRS = ["USD/JPY"]
+HISTORY_DAYS = 400
+NY_TZ = ZoneInfo("America/New_York")
+SESSION_CLOSE_HOUR = 17  # daily session boundary: 17:00 New York time
 
 
-def create_table(conn):
+def create_table(conn: sqlite3.Connection) -> None:
     conn.execute("""
         CREATE TABLE IF NOT EXISTS price_history (
             pair TEXT NOT NULL,
@@ -31,23 +38,51 @@ def create_table(conn):
     conn.commit()
 
 
-def fetch_daily(ticker_symbol):
-    ticker = yf.Ticker(ticker_symbol)
-    start = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
-    data = ticker.history(start=start, interval="1d")
-    return data
+def fetch_hourly(pair: str) -> pd.DataFrame:
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=HISTORY_DAYS)
+    return dukascopy_python.fetch(
+        pair,
+        dukascopy_python.INTERVAL_HOUR_1,
+        dukascopy_python.OFFER_SIDE_BID,
+        start,
+        end,
+    )
 
 
-def truncate(value, decimals):
+def session_date(ts: datetime) -> date:
+    """Date of the NY-17:00-to-17:00 trading session an hourly bar belongs to.
+
+    A session opens at 17:00 NY time and is labeled with the date it closes on
+    (matching the "New York close" convention used by MT4/MT5 and most brokers).
+    """
+    ny_time = ts.astimezone(NY_TZ)
+    day = ny_time.date()
+    return day + timedelta(days=1) if ny_time.hour >= SESSION_CLOSE_HOUR else day
+
+
+def resample_to_daily(hourly: pd.DataFrame) -> pd.DataFrame:
+    hourly = hourly.sort_index()
+    sessions = hourly.index.to_series().apply(session_date)
+    daily = hourly.groupby(sessions).agg(
+        open=("open", "first"),
+        high=("high", "max"),
+        low=("low", "min"),
+        close=("close", "last"),
+    )
+    daily.index.name = "date"
+    return daily
+
+
+def truncate(value: float, decimals: int) -> float:
     factor = 10 ** decimals
     return math.floor(value * factor) / factor
 
 
-def save_to_sqlite(pair, data, conn):
+def save_to_sqlite(pair: str, data: pd.DataFrame, conn: sqlite3.Connection) -> None:
     decimals = 3 if "JPY" in pair else 5
     cursor = conn.cursor()
-    for index, row in data.iterrows():
-        date_str = index.strftime("%Y-%m-%d")
+    for date, row in data.iterrows():
         cursor.execute(
             """
             INSERT OR REPLACE INTO price_history
@@ -56,33 +91,30 @@ def save_to_sqlite(pair, data, conn):
         """,
             (
                 pair,
-                date_str,
-                truncate(float(row["Open"]), decimals),
-                truncate(float(row["High"]), decimals),
-                truncate(float(row["Low"]), decimals),
-                truncate(float(row["Close"]), decimals),
+                date.isoformat(),
+                truncate(float(row["open"]), decimals),
+                truncate(float(row["high"]), decimals),
+                truncate(float(row["low"]), decimals),
+                truncate(float(row["close"]), decimals),
             ),
         )
     conn.commit()
     print(f"  Saved {len(data)} records")
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Fetch daily FX OHLC data from Yahoo Finance"
+        description="Fetch daily FX OHLC data from Dukascopy (built from 1H bars, NY 17:00 session close)"
     )
     parser.add_argument(
         "pairs",
         nargs="*",
         metavar="PAIR",
-        help=f"Pairs to fetch (default: {', '.join(PAIRS.keys())}). Any pair is accepted (e.g. AUDJPY).",
+        help=f"Pairs to fetch (default: {', '.join(DEFAULT_PAIRS)}), e.g. USD/JPY, EUR/USD, GBP/USD",
     )
     args = parser.parse_args()
 
-    if args.pairs:
-        target_pairs = {p.upper(): PAIRS.get(p.upper(), f"{p.upper()}=X") for p in args.pairs}
-    else:
-        target_pairs = PAIRS
+    target_pairs = [p.upper() for p in args.pairs] if args.pairs else DEFAULT_PAIRS
 
     os.makedirs("/data/db", exist_ok=True)
     conn = sqlite3.connect("/data/db/fx_utils.db")
@@ -90,15 +122,18 @@ def main():
     try:
         create_table(conn)
 
-        for pair, ticker_symbol in target_pairs.items():
-            print(f"Fetching {pair} ({ticker_symbol})...")
-            data = fetch_daily(ticker_symbol)
-            if data.empty:
-                print(f"  No data returned")
+        for pair in target_pairs:
+            print(f"Fetching {pair}...")
+            try:
+                hourly = fetch_hourly(pair)
+            except Exception as e:
+                print(f"  Failed to fetch {pair}: {e}")
                 continue
-            print(
-                f"  {len(data)} records: {data.index[0].date()} to {data.index[-1].date()}"
-            )
+            if hourly.empty:
+                print("  No data returned")
+                continue
+            data = resample_to_daily(hourly)
+            print(f"  {len(data)} records: {data.index[0]} to {data.index[-1]}")
             save_to_sqlite(pair, data, conn)
 
     finally:

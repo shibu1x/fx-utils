@@ -1,11 +1,14 @@
 services:
   dev:
-    # docker compose run --rm dev python grid_settings.py
-    # docker compose run --rm dev python grid_basket_calc.py --entry 150.00 --price 149.00 --direction buy
+    # docker compose run --rm dev daily_range_analysis.py
+    # docker compose run --rm dev grid_basket_calc.py --entry 150.00 --price 149.00 --direction buy
     image: ${REGISTRY}/fx-utils:dev
     build:
       context: ./app
       dockerfile: Dockerfile.dev
+    environment:
+      PAIRS: USDJPY
+      USDJPY_ACCOUNTS: exness,ic_markets
     tty: true
     volumes:
       - "./app:/app"

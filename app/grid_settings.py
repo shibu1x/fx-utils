@@ -37,6 +37,10 @@ def round_center_pips(pips: int, grid_step: int) -> int:
     return pips
 
 
+def env_prefix(pair: str) -> str:
+    return pair.replace("/", "")
+
+
 def env_val(key: str, default, cast):
     raw = os.environ.get(key, str(default))
     try:
@@ -79,16 +83,17 @@ class PairConfig:
     @classmethod
     def from_env(cls, pair: str) -> "PairConfig":
         p = pair.upper()
-        center_max_str = os.environ.get(f"{p}_GRID_CENTER_MAX")
-        center_min_str = os.environ.get(f"{p}_GRID_CENTER_MIN")
-        raw_accounts = os.environ.get(f"{p}_ACCOUNTS", "")
-        accounts = [a for e in raw_accounts.split(",") if e.strip() for a in [Account.parse(e)] if a]
+        e = env_prefix(p)
+        center_max_str = os.environ.get(f"{e}_GRID_CENTER_MAX")
+        center_min_str = os.environ.get(f"{e}_GRID_CENTER_MIN")
+        raw_accounts = os.environ.get(f"{e}_ACCOUNTS", "")
+        accounts = [a for entry in raw_accounts.split(",") if entry.strip() for a in [Account.parse(entry)] if a]
         return cls(
             pair=p,
-            magic_number=env_val(f"{p}_MAGIC_NUMBER", 8001, int),
-            grid_step_pips=env_val(f"{p}_GRID_STEP_PIPS", 5, int),
-            center_adjustment=env_val(f"{p}_GRID_CENTER_ADJUSTMENT", 0, float),
-            grid_range=env_val(f"{p}_GRID_RANGE", 1, float),
+            magic_number=env_val(f"{e}_MAGIC_NUMBER", 8001, int),
+            grid_step_pips=env_val(f"{e}_GRID_STEP_PIPS", 5, int),
+            center_adjustment=env_val(f"{e}_GRID_CENTER_ADJUSTMENT", 0, float),
+            grid_range=env_val(f"{e}_GRID_RANGE", 1, float),
             center_max=float(center_max_str) if center_max_str else None,
             center_min=float(center_min_str) if center_min_str else None,
             accounts=accounts,
@@ -130,7 +135,7 @@ def calculate_grid(config: PairConfig, previous_date: str, previous_close: float
 
 
 def write_set_file(config: PairConfig, account: Account, result: GridResult) -> None:
-    path = f"{OUTPUT_DIR}/{account.name}/{config.pair.lower()}.set"
+    path = f"{OUTPUT_DIR}/{account.name}/{env_prefix(config.pair).lower()}.set"
     content = (
         f"; === Basic Settings ===\n"
         f"GridStepPips={config.grid_step_pips}\n"
