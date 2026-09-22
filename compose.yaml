@@ -6,10 +6,9 @@ services:
     build:
       context: ./app
       dockerfile: Dockerfile.dev
-    environment:
-      PAIRS: USDJPY
-      USDJPY_ACCOUNTS: exness,ic_markets
     tty: true
+    environment:
+      DISCORD_WEBHOOK_URL:
     volumes:
       - "./app:/app"
       - "./data:/data"
