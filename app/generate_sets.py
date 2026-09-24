@@ -26,6 +26,7 @@ FIB_LOOKBACK = 15
 FIB_MIN_RANGE_PIPS = 250
 FIB_RETRACEMENT = 0.5
 FIB_SELL_ENTRY_DISTANCE_PIPS = 170
+BEARISH_CANDLE_SELL_ENTRY_DISTANCE_PIPS = 130
 
 
 def pip_factor(pair: str) -> int:
@@ -157,6 +158,34 @@ def is_below_fib_retracement(
     return last_close <= fib_level
 
 
+def is_last_close_bearish(db_path: str, pair: str, today: date, verbose: bool = True) -> bool:
+    """True if the last confirmed candle (before `today`) closed below its open."""
+    if not os.path.exists(db_path):
+        if verbose:
+            print(f"Warning: No database at {db_path}, skipping bearish candle check")
+        return False
+
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT date, open, close FROM price_history WHERE pair = ? AND date < ? ORDER BY date DESC LIMIT 1",
+            (pair, today.isoformat()),
+        ).fetchone()
+
+    if row is None:
+        if verbose:
+            print(f"Warning: No confirmed candle for {pair}, skipping bearish candle check")
+        return False
+
+    last_date, last_open, last_close = row
+    if verbose:
+        print(f"\n[Bearish Candle: {pair}]")
+        print(f"Last confirmed date: {last_date}")
+        print(f"Open: {last_open:.2f}  Close: {last_close:.2f}")
+        print("Bearish" if last_close < last_open else "Not bearish")
+
+    return last_close < last_open
+
+
 def decide_entry_distances(
     events: dict[str, list[str]],
     db_path: str,
@@ -166,13 +195,15 @@ def decide_entry_distances(
     today: date,
     verbose: bool = True,
 ) -> tuple[int | None, int | None, str]:
-    """Priority: 1. today's event, 2. Fibonacci Retracement, 3. Bollinger Bands +sigma, 4. tomorrow's event."""
+    """Priority: 1. today's event, 2. Fibonacci Retracement, 3. Bollinger Bands +sigma, 4. tomorrow's event,
+    5. last confirmed candle bearish."""
     today_event_pips = sell_entry_distance_override(events, today)
     below_fib_retracement = is_below_fib_retracement(
         db_path, pair, FIB_LOOKBACK, FIB_MIN_RANGE_PIPS, FIB_RETRACEMENT, today, verbose=verbose
     )
     above_upper_band = is_above_upper_band(db_path, pair, period, sigma, today, verbose=verbose)
     tomorrow_event_pips = sell_entry_distance_override(events, today + timedelta(days=1))
+    last_close_bearish = is_last_close_bearish(db_path, pair, today, verbose=verbose)
 
     if today_event_pips is not None:
         return today_event_pips, None, "today event"
@@ -182,6 +213,8 @@ def decide_entry_distances(
         return 0, 70, f"{pair} above +{sigma}σ"
     if tomorrow_event_pips is not None:
         return tomorrow_event_pips, None, "tomorrow event"
+    if last_close_bearish:
+        return BEARISH_CANDLE_SELL_ENTRY_DISTANCE_PIPS, None, f"{pair} last candle bearish"
     return None, None, "none"
 
 
@@ -286,12 +319,11 @@ def main() -> None:
     elif sell_entry_distance_pips is not None:
         message = f"SellEntryDistancePips: {sell_entry_distance_pips} ({reason})"
     else:
-        message = None
+        message = f"No override (reason: {reason})"
 
-    if message is not None:
-        print(message)
-        notify_discord(DISCORD_WEBHOOK_URL, message)
+    print(message)
 
+    changed = False
     for name1 in sorted(os.listdir(ACCOUNTS_DIR)):
         name1_dir = os.path.join(ACCOUNTS_DIR, name1)
         if not os.path.isdir(name1_dir):
@@ -318,9 +350,18 @@ def main() -> None:
             out_dir = os.path.join(OUTPUT_DIR, name2)
             os.makedirs(out_dir, exist_ok=True)
             out_path = os.path.join(out_dir, f"{name1}.set")
+            if os.path.exists(out_path):
+                with open(out_path) as f:
+                    file_changed = f.read() != content
+            else:
+                file_changed = True
+            changed = changed or file_changed
             with open(out_path, "w") as f:
                 f.write(content)
             print(f"Written: {out_path}")
+
+    if changed:
+        notify_discord(DISCORD_WEBHOOK_URL, message)
 
 
 if __name__ == "__main__":
