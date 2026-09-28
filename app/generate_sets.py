@@ -259,7 +259,10 @@ def notify_discord(webhook_url: str | None, message: str) -> None:
         return
     body = json.dumps({"content": message}).encode("utf-8")
     req = urllib.request.Request(
-        webhook_url, data=body, headers={"Content-Type": "application/json"}, method="POST"
+        webhook_url,
+        data=body,
+        headers={"Content-Type": "application/json", "User-Agent": "fx-utils-bot/1.0"},
+        method="POST",
     )
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
