@@ -12,6 +12,8 @@ from datetime import date, timedelta
 
 
 DEFAULT_SET_FILENAME = "default.set"
+FEED_NAME1 = "feed"
+BREAKOUT_NAME1 = "breakout"
 ACCOUNTS_DIR = "/data/input/sets"
 EVENTS_PATH = "/data/input/events.tsv"
 DB_PATH = "/data/db/fx_utils.db"
@@ -35,7 +37,7 @@ def pip_factor(pair: str) -> int:
 
 def load_overrides(path: str) -> dict[str, str]:
     overrides: dict[str, str] = {}
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith(";") or "=" not in line:
@@ -194,9 +196,10 @@ def decide_entry_distances(
     sigma: int,
     today: date,
     verbose: bool = True,
-) -> tuple[int | None, int | None, str]:
+) -> tuple[int | None, int | None, str, bool]:
     """Priority: 1. today's event, 2. Fibonacci Retracement, 3. Bollinger Bands +sigma, 4. tomorrow's event,
-    5. last confirmed candle bearish."""
+    5. last confirmed candle bearish. Also returns whether the last confirmed candle was bearish, regardless
+    of whether it decided the priority chain, for use by other overrides (e.g. breakout's SellOpenNew)."""
     today_event_pips = sell_entry_distance_override(events, today)
     below_fib_retracement = is_below_fib_retracement(
         db_path, pair, FIB_LOOKBACK, FIB_MIN_RANGE_PIPS, FIB_RETRACEMENT, today, verbose=verbose
@@ -206,16 +209,26 @@ def decide_entry_distances(
     last_close_bearish = is_last_close_bearish(db_path, pair, today, verbose=verbose)
 
     if today_event_pips is not None:
-        return today_event_pips, None, "today event"
+        return today_event_pips, None, "today event", last_close_bearish
     if below_fib_retracement:
-        return FIB_SELL_ENTRY_DISTANCE_PIPS, None, f"{pair} below {FIB_RETRACEMENT:.0%} fib retracement"
+        return (
+            FIB_SELL_ENTRY_DISTANCE_PIPS,
+            None,
+            f"{pair} below {FIB_RETRACEMENT:.0%} fib retracement",
+            last_close_bearish,
+        )
     if above_upper_band:
-        return 0, 70, f"{pair} above +{sigma}σ"
+        return 0, 70, f"{pair} above +{sigma}σ", last_close_bearish
     if tomorrow_event_pips is not None:
-        return tomorrow_event_pips, None, "tomorrow event"
+        return tomorrow_event_pips, None, "tomorrow event", last_close_bearish
     if last_close_bearish:
-        return BEARISH_CANDLE_SELL_ENTRY_DISTANCE_PIPS, None, f"{pair} last candle bearish"
-    return None, None, "none"
+        return (
+            BEARISH_CANDLE_SELL_ENTRY_DISTANCE_PIPS,
+            None,
+            f"{pair} last candle bearish",
+            last_close_bearish,
+        )
+    return None, None, "none", last_close_bearish
 
 
 def all_price_history_dates(db_path: str, pair: str) -> list[date]:
@@ -241,7 +254,7 @@ def run_history(events: dict[str, list[str]]) -> None:
     with open(HISTORY_OUTPUT_PATH, "w") as f:
         f.write("date\tsell_entry_distance_pips\tbuy_entry_distance_pips\treason\n")
         for d in dates:
-            sell_pips, buy_pips, reason = decide_entry_distances(
+            sell_pips, buy_pips, reason, _ = decide_entry_distances(
                 events, DB_PATH, BOLLINGER_PAIR, BOLLINGER_PERIOD, BOLLINGER_SIGMA, d, verbose=False
             )
             if reason == "none":
@@ -314,7 +327,7 @@ def main() -> None:
         return
 
     today = date.today()
-    sell_entry_distance_pips, buy_entry_distance_pips, reason = decide_entry_distances(
+    sell_entry_distance_pips, buy_entry_distance_pips, reason, last_close_bearish = decide_entry_distances(
         events, DB_PATH, BOLLINGER_PAIR, BOLLINGER_PERIOD, BOLLINGER_SIGMA, today
     )
     if buy_entry_distance_pips is not None:
@@ -336,30 +349,37 @@ def main() -> None:
         if not os.path.exists(default_set_path):
             print(f"Warning: No {DEFAULT_SET_FILENAME} in {name1_dir}, skipping")
             continue
-        with open(default_set_path) as f:
+        with open(default_set_path, encoding="utf-8") as f:
             template_lines = f.readlines()
+
+        apply_entry_distance_override = name1 == FEED_NAME1
+        apply_breakout_override = name1 == BREAKOUT_NAME1
 
         for filename in sorted(os.listdir(name1_dir)):
             if not filename.endswith(".set") or filename == DEFAULT_SET_FILENAME:
                 continue
             name2 = filename[: -len(".set")]
             overrides = load_overrides(os.path.join(name1_dir, filename))
-            if sell_entry_distance_pips is not None:
-                overrides["SellEntryDistancePips"] = str(sell_entry_distance_pips)
-            if buy_entry_distance_pips is not None:
-                overrides["BuyEntryDistancePips"] = str(buy_entry_distance_pips)
+            if apply_entry_distance_override:
+                if sell_entry_distance_pips is not None:
+                    overrides["SellEntryDistancePips"] = str(sell_entry_distance_pips)
+                if buy_entry_distance_pips is not None:
+                    overrides["BuyEntryDistancePips"] = str(buy_entry_distance_pips)
+            if apply_breakout_override and last_close_bearish:
+                overrides["SellOpenNew"] = "false"
             content = render(template_lines, overrides)
 
             out_dir = os.path.join(OUTPUT_DIR, name2)
             os.makedirs(out_dir, exist_ok=True)
             out_path = os.path.join(out_dir, f"{name1}.set")
             if os.path.exists(out_path):
-                with open(out_path) as f:
+                with open(out_path, encoding="utf-8") as f:
                     file_changed = f.read() != content
             else:
                 file_changed = True
-            changed = changed or file_changed
-            with open(out_path, "w") as f:
+            if apply_entry_distance_override:
+                changed = changed or file_changed
+            with open(out_path, "w", encoding="utf-8") as f:
                 f.write(content)
             print(f"Written: {out_path}")
 
