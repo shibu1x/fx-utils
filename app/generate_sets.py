@@ -29,6 +29,7 @@ FIB_MIN_RANGE_PIPS = 250
 FIB_RETRACEMENT = 0.5
 FIB_SELL_ENTRY_DISTANCE_PIPS = 170
 BEARISH_CANDLE_SELL_ENTRY_DISTANCE_PIPS = 130
+BREAKOUT_HIGH_MINUS_CLOSE_MIN_PIPS = 100
 
 
 def pip_factor(pair: str) -> int:
@@ -188,6 +189,36 @@ def is_last_close_bearish(db_path: str, pair: str, today: date, verbose: bool = 
     return last_close < last_open
 
 
+def is_last_high_minus_close_at_least(
+    db_path: str, pair: str, min_pips: int, today: date, verbose: bool = True
+) -> bool:
+    """True if the last confirmed candle's high - close >= min_pips."""
+    if not os.path.exists(db_path):
+        if verbose:
+            print(f"Warning: No database at {db_path}, skipping high-close pip check")
+        return False
+
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT date, high, close FROM price_history WHERE pair = ? AND date < ? ORDER BY date DESC LIMIT 1",
+            (pair, today.isoformat()),
+        ).fetchone()
+
+    if row is None:
+        if verbose:
+            print(f"Warning: No confirmed candle for {pair}, skipping high-close pip check")
+        return False
+
+    last_date, last_high, last_close = row
+    diff_pips = (last_high - last_close) * pip_factor(pair)
+    if verbose:
+        print(f"\n[High - Close: {pair}]")
+        print(f"Last confirmed date: {last_date}")
+        print(f"High: {last_high:.2f}  Close: {last_close:.2f}  Diff: {diff_pips:.0f} pips")
+
+    return diff_pips >= min_pips
+
+
 def decide_entry_distances(
     events: dict[str, list[str]],
     db_path: str,
@@ -196,10 +227,9 @@ def decide_entry_distances(
     sigma: int,
     today: date,
     verbose: bool = True,
-) -> tuple[int | None, int | None, str, bool]:
+) -> tuple[int | None, int | None, str]:
     """Priority: 1. today's event, 2. Fibonacci Retracement, 3. Bollinger Bands +sigma, 4. tomorrow's event,
-    5. last confirmed candle bearish. Also returns whether the last confirmed candle was bearish, regardless
-    of whether it decided the priority chain, for use by other overrides (e.g. breakout's SellOpenNew)."""
+    5. last confirmed candle bearish."""
     today_event_pips = sell_entry_distance_override(events, today)
     below_fib_retracement = is_below_fib_retracement(
         db_path, pair, FIB_LOOKBACK, FIB_MIN_RANGE_PIPS, FIB_RETRACEMENT, today, verbose=verbose
@@ -209,26 +239,16 @@ def decide_entry_distances(
     last_close_bearish = is_last_close_bearish(db_path, pair, today, verbose=verbose)
 
     if today_event_pips is not None:
-        return today_event_pips, None, "today event", last_close_bearish
+        return today_event_pips, None, "today event"
     if below_fib_retracement:
-        return (
-            FIB_SELL_ENTRY_DISTANCE_PIPS,
-            None,
-            f"{pair} below {FIB_RETRACEMENT:.0%} fib retracement",
-            last_close_bearish,
-        )
+        return FIB_SELL_ENTRY_DISTANCE_PIPS, None, f"{pair} below {FIB_RETRACEMENT:.0%} fib retracement"
     if above_upper_band:
-        return 0, 70, f"{pair} above +{sigma}σ", last_close_bearish
+        return 0, 70, f"{pair} above +{sigma}σ"
     if tomorrow_event_pips is not None:
-        return tomorrow_event_pips, None, "tomorrow event", last_close_bearish
+        return tomorrow_event_pips, None, "tomorrow event"
     if last_close_bearish:
-        return (
-            BEARISH_CANDLE_SELL_ENTRY_DISTANCE_PIPS,
-            None,
-            f"{pair} last candle bearish",
-            last_close_bearish,
-        )
-    return None, None, "none", last_close_bearish
+        return BEARISH_CANDLE_SELL_ENTRY_DISTANCE_PIPS, None, f"{pair} last candle bearish"
+    return None, None, "none"
 
 
 def all_price_history_dates(db_path: str, pair: str) -> list[date]:
@@ -254,7 +274,7 @@ def run_history(events: dict[str, list[str]]) -> None:
     with open(HISTORY_OUTPUT_PATH, "w") as f:
         f.write("date\tsell_entry_distance_pips\tbuy_entry_distance_pips\treason\n")
         for d in dates:
-            sell_pips, buy_pips, reason, _ = decide_entry_distances(
+            sell_pips, buy_pips, reason = decide_entry_distances(
                 events, DB_PATH, BOLLINGER_PAIR, BOLLINGER_PERIOD, BOLLINGER_SIGMA, d, verbose=False
             )
             if reason == "none":
@@ -327,8 +347,11 @@ def main() -> None:
         return
 
     today = date.today()
-    sell_entry_distance_pips, buy_entry_distance_pips, reason, last_close_bearish = decide_entry_distances(
+    sell_entry_distance_pips, buy_entry_distance_pips, reason = decide_entry_distances(
         events, DB_PATH, BOLLINGER_PAIR, BOLLINGER_PERIOD, BOLLINGER_SIGMA, today
+    )
+    breakout_high_minus_close = is_last_high_minus_close_at_least(
+        DB_PATH, BOLLINGER_PAIR, BREAKOUT_HIGH_MINUS_CLOSE_MIN_PIPS, today
     )
     if buy_entry_distance_pips is not None:
         message = f"SellEntryDistancePips: {sell_entry_distance_pips}, BuyEntryDistancePips: {buy_entry_distance_pips} ({reason})"
@@ -365,7 +388,7 @@ def main() -> None:
                     overrides["SellEntryDistancePips"] = str(sell_entry_distance_pips)
                 if buy_entry_distance_pips is not None:
                     overrides["BuyEntryDistancePips"] = str(buy_entry_distance_pips)
-            if apply_breakout_override and last_close_bearish:
+            if apply_breakout_override and breakout_high_minus_close:
                 overrides["SellOpenNew"] = "false"
             content = render(template_lines, overrides)
 
