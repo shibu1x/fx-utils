@@ -12,7 +12,7 @@ from datetime import date, timedelta
 
 
 DEFAULT_SET_FILENAME = "default.set"
-FEED_NAME1 = "feed"
+FADE_NAME1 = "fade"
 BREAKOUT_NAME1 = "breakout"
 ACCOUNTS_DIR = "/data/input/sets"
 EVENTS_PATH = "/data/input/events.tsv"
@@ -375,7 +375,7 @@ def main() -> None:
         with open(default_set_path, encoding="utf-8") as f:
             template_lines = f.readlines()
 
-        apply_entry_distance_override = name1 == FEED_NAME1
+        apply_entry_distance_override = name1 == FADE_NAME1
         apply_breakout_override = name1 == BREAKOUT_NAME1
 
         for filename in sorted(os.listdir(name1_dir)):
@@ -400,7 +400,7 @@ def main() -> None:
                     file_changed = f.read() != content
             else:
                 file_changed = True
-            if apply_entry_distance_override:
+            if apply_entry_distance_override or apply_breakout_override:
                 changed = changed or file_changed
             with open(out_path, "w", encoding="utf-8") as f:
                 f.write(content)
