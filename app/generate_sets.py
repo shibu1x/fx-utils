@@ -356,16 +356,18 @@ def main() -> None:
     breakout_high_minus_close = is_last_high_minus_close_at_least(
         DB_PATH, BOLLINGER_PAIR, BREAKOUT_HIGH_MINUS_CLOSE_MIN_PIPS, today
     )
+    messages = []
     if buy_entry_distance_pips is not None:
-        message = f"SellEntryDistancePips: {sell_entry_distance_pips}, BuyEntryDistancePips: {buy_entry_distance_pips} ({reason})"
+        messages.append(f"[{FADE_NAME1}] {reason}: SellEntryDistancePips: {sell_entry_distance_pips}, BuyEntryDistancePips: {buy_entry_distance_pips}")
     elif sell_entry_distance_pips is not None:
-        message = f"SellEntryDistancePips: {sell_entry_distance_pips} ({reason})"
-    else:
-        message = f"No override (reason: {reason})"
+        messages.append(f"[{FADE_NAME1}] {reason}: SellEntryDistancePips: {sell_entry_distance_pips}")
+    if breakout_high_minus_close:
+        messages.append(f"[{BREAKOUT_NAME1}] high - close >= {BREAKOUT_HIGH_MINUS_CLOSE_MIN_PIPS} pips: SellOpenNew: false")
+    message = "\n".join(messages)
 
     print(message)
 
-    changed = False
+    changed_files: list[str] = []
     for name1 in sorted(os.listdir(ACCOUNTS_DIR)):
         name1_dir = os.path.join(ACCOUNTS_DIR, name1)
         if not os.path.isdir(name1_dir):
@@ -403,13 +405,15 @@ def main() -> None:
                     file_changed = f.read() != content
             else:
                 file_changed = True
-            if apply_entry_distance_override or apply_breakout_override:
-                changed = changed or file_changed
+            if (apply_entry_distance_override or apply_breakout_override) and file_changed:
+                changed_files.append(os.path.relpath(out_path, OUTPUT_DIR))
             with open(out_path, "w", encoding="utf-8") as f:
                 f.write(content)
             print(f"Written: {out_path}")
 
-    if changed:
+    if changed_files:
+        files_list = "\n".join(f"- {path}" for path in changed_files)
+        message = f"{message}\n\nUpdated files:\n{files_list}"
         notify_discord(DISCORD_WEBHOOK_URL, message)
 
 
