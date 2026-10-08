@@ -405,7 +405,7 @@ def main() -> None:
                     file_changed = f.read() != content
             else:
                 file_changed = True
-            if (apply_entry_distance_override or apply_breakout_override) and file_changed:
+            if file_changed:
                 changed_files.append(os.path.relpath(out_path, OUTPUT_DIR))
             with open(out_path, "w", encoding="utf-8") as f:
                 f.write(content)
