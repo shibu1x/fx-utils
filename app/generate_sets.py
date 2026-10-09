@@ -2,36 +2,26 @@
 """Generate MT5 EA .set files per account from data/input/sets/<name1>/default.set, overridden by data/input/sets/<name1>/<name2>.set."""
 
 import argparse
-import csv
 import json
 import os
 import sqlite3
 import urllib.error
 import urllib.request
-from datetime import date, timedelta
+from datetime import date
 
 
 DEFAULT_SET_FILENAME = "default.set"
 FADE_NAME1 = "fade"
 BREAKOUT_NAME1 = "breakout"
 ACCOUNTS_DIR = "/data/input/sets"
-EVENTS_PATH = "/data/input/events.tsv"
 DB_PATH = "/data/db/fx_utils.db"
 OUTPUT_DIR = "/data/output/sets"
 HISTORY_OUTPUT_PATH = "/data/output/generate_sets_history.tsv"
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
-SELL_ENTRY_DISTANCE_PIPS_LOW = 100
-SELL_ENTRY_DISTANCE_PIPS_MID = 130
-SELL_ENTRY_DISTANCE_PIPS_HIGH = 160
-EVENT_SELL_ENTRY_DISTANCE_PIPS = {"日銀": SELL_ENTRY_DISTANCE_PIPS_MID, "FOMC": SELL_ENTRY_DISTANCE_PIPS_LOW}
 BOLLINGER_PAIR = "USD/JPY"
 BOLLINGER_PERIOD = 20
 BOLLINGER_SIGMA = 2
-FIB_LOOKBACK = 15
-FIB_MIN_RANGE_PIPS = 250
-FIB_RETRACEMENT = 0.5
-FIB_SELL_ENTRY_DISTANCE_PIPS = SELL_ENTRY_DISTANCE_PIPS_HIGH
-BEARISH_CANDLE_SELL_ENTRY_DISTANCE_PIPS = SELL_ENTRY_DISTANCE_PIPS_LOW
+BOLLINGER_BUY_ENTRY_DISTANCE_PIPS = 70
 BREAKOUT_HIGH_MINUS_CLOSE_MIN_PIPS = 100
 
 
@@ -49,24 +39,6 @@ def load_overrides(path: str) -> dict[str, str]:
             key, _, value = line.partition("=")
             overrides[key.strip()] = value.strip()
     return overrides
-
-
-def load_events(path: str) -> dict[str, list[str]]:
-    events: dict[str, list[str]] = {}
-    if not os.path.exists(path):
-        print(f"Warning: No events file at {path}, skipping event-based overrides")
-        return events
-    with open(path, newline="") as f:
-        reader = csv.DictReader(f, delimiter="\t")
-        for row in reader:
-            events.setdefault(row["date"], []).append(row["event"])
-    return events
-
-
-def sell_entry_distance_override(events: dict[str, list[str]], d: date) -> int | None:
-    names = events.get(d.isoformat(), [])
-    matches = [dist for name in names for event, dist in EVENT_SELL_ENTRY_DISTANCE_PIPS.items() if event in name]
-    return max(matches) if matches else None
 
 
 def is_above_upper_band(
@@ -111,87 +83,6 @@ def is_above_upper_band(
     return last_close > upper
 
 
-def is_below_fib_retracement(
-    db_path: str,
-    pair: str,
-    lookback: int,
-    min_range_pips: int,
-    retracement: float,
-    today: date,
-    verbose: bool = True,
-) -> bool:
-    """True if the last `lookback` closes swung down >= min_range_pips (low more recent than high)
-    and the latest close hasn't yet retraced back above the `retracement` Fibonacci level."""
-    if not os.path.exists(db_path):
-        if verbose:
-            print(f"Warning: No database at {db_path}, skipping Fibonacci Retracement check")
-        return False
-
-    with sqlite3.connect(db_path) as conn:
-        rows = conn.execute(
-            "SELECT date, close FROM price_history WHERE pair = ? AND date < ? ORDER BY date DESC LIMIT ?",
-            (pair, today.isoformat(), lookback),
-        ).fetchall()
-
-    if len(rows) < lookback:
-        if verbose:
-            print(f"Warning: Not enough data for {pair} Fibonacci Retracement ({len(rows)}/{lookback} bars), skipping")
-        return False
-
-    rows.reverse()
-    closes = [close for _, close in rows]
-    last_close = closes[-1]
-    high = max(closes)
-    low = min(closes)
-    high_index = closes.index(high)
-    low_index = closes.index(low)
-    range_pips = (high - low) * pip_factor(pair)
-    fib_level = low + (high - low) * retracement
-
-    if verbose:
-        print(f"\n[Fibonacci Retracement: {pair}]")
-        print(
-            f"High: {high:.2f} ({rows[high_index][0]})  Low: {low:.2f} ({rows[low_index][0]})  "
-            f"Range: {range_pips:.0f} pips"
-        )
-        print(f"Last close: {last_close:.2f}  {retracement:.0%} level: {fib_level:.2f}")
-
-    if range_pips < min_range_pips:
-        return False
-    if low_index <= high_index:
-        return False
-
-    return last_close <= fib_level
-
-
-def is_last_close_bearish(db_path: str, pair: str, today: date, verbose: bool = True) -> bool:
-    """True if the last confirmed candle (before `today`) closed below its open."""
-    if not os.path.exists(db_path):
-        if verbose:
-            print(f"Warning: No database at {db_path}, skipping bearish candle check")
-        return False
-
-    with sqlite3.connect(db_path) as conn:
-        row = conn.execute(
-            "SELECT date, open, close FROM price_history WHERE pair = ? AND date < ? ORDER BY date DESC LIMIT 1",
-            (pair, today.isoformat()),
-        ).fetchone()
-
-    if row is None:
-        if verbose:
-            print(f"Warning: No confirmed candle for {pair}, skipping bearish candle check")
-        return False
-
-    last_date, last_open, last_close = row
-    if verbose:
-        print(f"\n[Bearish Candle: {pair}]")
-        print(f"Last confirmed date: {last_date}")
-        print(f"Open: {last_open:.2f}  Close: {last_close:.2f}")
-        print("Bearish" if last_close < last_open else "Not bearish")
-
-    return last_close < last_open
-
-
 def is_last_high_minus_close_at_least(
     db_path: str, pair: str, min_pips: int, today: date, verbose: bool = True
 ) -> bool:
@@ -222,36 +113,18 @@ def is_last_high_minus_close_at_least(
     return diff_pips >= min_pips
 
 
-def decide_entry_distances(
-    events: dict[str, list[str]],
+def decide_buy_entry_distance(
     db_path: str,
     pair: str,
     period: int,
     sigma: int,
     today: date,
     verbose: bool = True,
-) -> tuple[int | None, int | None, str]:
-    """Priority: 1. today's event, 2. Fibonacci Retracement, 3. Bollinger Bands +sigma, 4. tomorrow's event,
-    5. last confirmed candle bearish."""
-    today_event_pips = sell_entry_distance_override(events, today)
-    below_fib_retracement = is_below_fib_retracement(
-        db_path, pair, FIB_LOOKBACK, FIB_MIN_RANGE_PIPS, FIB_RETRACEMENT, today, verbose=verbose
-    )
-    above_upper_band = is_above_upper_band(db_path, pair, period, sigma, today, verbose=verbose)
-    tomorrow_event_pips = sell_entry_distance_override(events, today + timedelta(days=1))
-    last_close_bearish = is_last_close_bearish(db_path, pair, today, verbose=verbose)
-
-    if today_event_pips is not None:
-        return today_event_pips, None, "today event"
-    if below_fib_retracement:
-        return FIB_SELL_ENTRY_DISTANCE_PIPS, None, f"{pair} below {FIB_RETRACEMENT:.0%} fib retracement"
-    if above_upper_band:
-        return 0, 70, f"{pair} above +{sigma}σ"
-    if tomorrow_event_pips is not None:
-        return tomorrow_event_pips, None, "tomorrow event"
-    if last_close_bearish:
-        return BEARISH_CANDLE_SELL_ENTRY_DISTANCE_PIPS, None, f"{pair} last candle bearish"
-    return None, None, "none"
+) -> tuple[int | None, str]:
+    """If the last confirmed close is above the Bollinger upper band, override BuyEntryDistancePips."""
+    if is_above_upper_band(db_path, pair, period, sigma, today, verbose=verbose):
+        return BOLLINGER_BUY_ENTRY_DISTANCE_PIPS, f"{pair} above +{sigma}σ"
+    return None, "none"
 
 
 def all_price_history_dates(db_path: str, pair: str) -> list[date]:
@@ -266,7 +139,7 @@ def all_price_history_dates(db_path: str, pair: str) -> list[date]:
     return [date.fromisoformat(row[0]) for row in rows]
 
 
-def run_history(events: dict[str, list[str]]) -> None:
+def run_history() -> None:
     dates = all_price_history_dates(DB_PATH, BOLLINGER_PAIR)
     if not dates:
         print(f"No price history found for {BOLLINGER_PAIR}, nothing to write")
@@ -275,16 +148,14 @@ def run_history(events: dict[str, list[str]]) -> None:
     os.makedirs(os.path.dirname(HISTORY_OUTPUT_PATH), exist_ok=True)
     written = 0
     with open(HISTORY_OUTPUT_PATH, "w") as f:
-        f.write("date\tsell_entry_distance_pips\tbuy_entry_distance_pips\treason\n")
+        f.write("date\tbuy_entry_distance_pips\treason\n")
         for d in dates:
-            sell_pips, buy_pips, reason = decide_entry_distances(
-                events, DB_PATH, BOLLINGER_PAIR, BOLLINGER_PERIOD, BOLLINGER_SIGMA, d, verbose=False
+            buy_pips, reason = decide_buy_entry_distance(
+                DB_PATH, BOLLINGER_PAIR, BOLLINGER_PERIOD, BOLLINGER_SIGMA, d, verbose=False
             )
             if reason == "none":
                 continue
-            sell_str = "" if sell_pips is None else str(sell_pips)
-            buy_str = "" if buy_pips is None else str(buy_pips)
-            f.write(f"{d.isoformat()}\t{sell_str}\t{buy_str}\t{reason}\n")
+            f.write(f"{d.isoformat()}\t{buy_pips}\t{reason}\n")
             written += 1
 
     print(f"Wrote {written} rows to {HISTORY_OUTPUT_PATH}")
@@ -333,16 +204,14 @@ def main() -> None:
         "--history",
         action="store_true",
         help=(
-            f"write the daily SellEntryDistancePips/BuyEntryDistancePips judgment history for all "
+            f"write the daily BuyEntryDistancePips judgment history for all "
             f"{BOLLINGER_PAIR} dates in the database to {HISTORY_OUTPUT_PATH} instead of generating .set files"
         ),
     )
     args = parser.parse_args()
 
-    events = load_events(EVENTS_PATH)
-
     if args.history:
-        run_history(events)
+        run_history()
         return
 
     if not os.path.isdir(ACCOUNTS_DIR):
@@ -350,17 +219,15 @@ def main() -> None:
         return
 
     today = date.today()
-    sell_entry_distance_pips, buy_entry_distance_pips, reason = decide_entry_distances(
-        events, DB_PATH, BOLLINGER_PAIR, BOLLINGER_PERIOD, BOLLINGER_SIGMA, today
+    buy_entry_distance_pips, reason = decide_buy_entry_distance(
+        DB_PATH, BOLLINGER_PAIR, BOLLINGER_PERIOD, BOLLINGER_SIGMA, today
     )
     breakout_high_minus_close = is_last_high_minus_close_at_least(
         DB_PATH, BOLLINGER_PAIR, BREAKOUT_HIGH_MINUS_CLOSE_MIN_PIPS, today
     )
     messages = []
     if buy_entry_distance_pips is not None:
-        messages.append(f"[{FADE_NAME1}] {reason}: SellEntryDistancePips: {sell_entry_distance_pips}, BuyEntryDistancePips: {buy_entry_distance_pips}")
-    elif sell_entry_distance_pips is not None:
-        messages.append(f"[{FADE_NAME1}] {reason}: SellEntryDistancePips: {sell_entry_distance_pips}")
+        messages.append(f"[{FADE_NAME1}] {reason}: BuyEntryDistancePips: {buy_entry_distance_pips}")
     if breakout_high_minus_close:
         messages.append(f"[{BREAKOUT_NAME1}] high - close >= {BREAKOUT_HIGH_MINUS_CLOSE_MIN_PIPS} pips: SellOpenNew: false")
     message = "\n".join(messages)
@@ -388,11 +255,8 @@ def main() -> None:
                 continue
             name2 = filename[: -len(".set")]
             overrides = load_overrides(os.path.join(name1_dir, filename))
-            if apply_entry_distance_override:
-                if sell_entry_distance_pips is not None:
-                    overrides["SellEntryDistancePips"] = str(sell_entry_distance_pips)
-                if buy_entry_distance_pips is not None:
-                    overrides["BuyEntryDistancePips"] = str(buy_entry_distance_pips)
+            if apply_entry_distance_override and buy_entry_distance_pips is not None:
+                overrides["BuyEntryDistancePips"] = str(buy_entry_distance_pips)
             if apply_breakout_override and breakout_high_minus_close:
                 overrides["SellOpenNew"] = "false"
             content = render(template_lines, overrides)
