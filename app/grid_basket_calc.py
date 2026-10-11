@@ -11,6 +11,9 @@ level) and the resulting margin and unrealized P&L.
 Assumes price moved monotonically from entry to the extreme, then retraced
 to price - order fills and basket TP/SL are not simulated, only the final
 levels reached (determined by the extreme) and their P&L at price.
+
+--extreme may be omitted, defaulting to --price (i.e. price moved straight
+from entry to price with no retrace).
 """
 
 import argparse
@@ -96,9 +99,10 @@ def main() -> None:
                      "given a level-0 entry price, the furthest (extreme) price reached, and the current price"
     )
     parser.add_argument("--entry", type=float, required=True, help="Level-0 entry price")
-    parser.add_argument("--extreme", type=float, required=True,
+    parser.add_argument("--extreme", type=float, default=None,
                          help="Furthest price reached after entry, before retracing to --price "
-                              "(determines which grid levels opened)")
+                              "(determines which grid levels opened); defaults to --price "
+                              "(i.e. price moved straight from entry to price with no retrace)")
     parser.add_argument("--price", type=float, required=True,
                          help="Current price to evaluate the open basket's P&L at, after retracing from --extreme")
     parser.add_argument("--direction", choices=["buy", "sell", "both"], default="buy", help="Basket direction (default: buy)")
@@ -113,12 +117,14 @@ def main() -> None:
     if args.max_levels < 0:
         parser.error("--max-levels must be non-negative")
 
+    extreme = args.extreme if args.extreme is not None else args.price
+
     directions = ["buy", "sell"] if args.direction == "both" else [args.direction]
     grand_total = 0.0
     for direction in directions:
-        positions = build_positions(args.entry, args.extreme, direction, args.lot, args.lot_multiplier,
+        positions = build_positions(args.entry, extreme, direction, args.lot, args.lot_multiplier,
                                      args.grid_step_pips, args.grid_step_multiplier, args.max_levels)
-        grand_total += print_report(direction, args.entry, args.extreme, args.price, positions, args.leverage)
+        grand_total += print_report(direction, args.entry, extreme, args.price, positions, args.leverage)
 
     if len(directions) > 1:
         print(f"\n=== Combined Total P&L: {grand_total:,.2f} USD ===")
